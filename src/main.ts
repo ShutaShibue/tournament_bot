@@ -17,8 +17,8 @@ dotenv.config()
 
 // database init
 const db = new sqlite3.Database('db.sqlite3')
-const tableMake = sql_table()
-db.run(tableMake);
+setupSQL()
+
 
 // discord client init
 const client = new Client({
@@ -28,7 +28,7 @@ const client = new Client({
 
 client.once('ready', () => {
     console.log('Ready!')
-    console.log(client.user?.id)
+    console.log(client.user?.tag)
     client.user?.setActivity(
         `開発中`,
     )
@@ -36,9 +36,7 @@ client.once('ready', () => {
 
 client.on('messageCreate', async (message: Message) => {
     if (message.author.bot) return
-    if (message.content.startsWith('pt追加')){
-        if(isAdmin(message.author.id)) adjustPoints(message)
-    }
+    if (message.content.startsWith('pt追加') && isAdmin(message.author.id)) adjustPoints(message)
     if (message.channel.type !== "DM") return
     if (!client.user) return
     const botID = client.user.id
@@ -48,74 +46,80 @@ client.on('messageCreate', async (message: Message) => {
 client.login(process.env.TOKEN)
 
 function playerSystem(message:Message){
-    const userID = message.author.id
-    const ch = client.users.cache.get(userID)?.dmChannel
+    const id = message.author.id
+    const ch = client.users.cache.get(id)?.dmChannel
 
     ch?.send(
         '何をしますか?\n1: 割り振り状況、pt残高を確認したい\n2: 投票したい\n3:新たにプレイヤー登録しました。確認してください。'
         )
-    const filter = (msg:Message) => msg.author.id === message.author.id
+    const filter = (msg:Message) => msg.author.id === id
     ch?.awaitMessages({ filter, max: 1, time: 10 * 1000 })
     .then(async collected => {
         if (!collected.size) return ch.send('タイムアウトしました')
-        const selector =  collected.first()?.content
-        if (selector === "1")  sendVotingStatus(ch, id)
-        else if (selector === "2") await vote(ch, id)
-        else if (selector === "3") await fetchPD().then(()=> ch.send('データベースを更新しました'))
-        else if (selector === "dev") await total()
+        const sel =  collected.first()?.content
+        if (sel === "1")  sendVotingStatus(ch, id)
+        else if (sel === "2") await vote(ch, id)
+        else if (sel === "3") await fetchPD(id).then(()=> ch.send('データベースを更新しました'))
+        else if (sel === "dev"){
+            const pts:Array<number> = await total()
+            const ptEarned = pts.pop()!
+            const ptUsed = pts.reduce((a, b) => a + b, 0)
+            ch.send((ptEarned-ptUsed).toString())
+        }
         else ch.send('終了します')  
     })
 }
-
-
 
 async function vote(ch:DMChannel, id:string) {
 
     const balance = await sendVotingStatus(ch, id)
     ch.send('投票したいキャラクターの番号を入力してください。')
     const filter = (msg:Message) => msg.author.id !== client.user?.id
-
     // select character
-    ch.awaitMessages({ filter, max: 1, time: 20 * 1000 })
-    .then(async collected => {
-        if (!collected.size) return ch.send('タイムアウトしました。投票をキャンセルします')
-        const charID =  Number(collected.first()?.content)
-        const votedChar = characters[charID]
-        if(!votedChar) return ch.send('不明なキャラクターIDです。投票をキャンセルします')
+    const charIdStr = await ch.awaitMessages({ filter, max: 1, time: 20 * 1000 })
+    if (!charIdStr.size) return ch.send('タイムアウトしました。投票をキャンセルします')
+    const charIdNum =  Number(charIdStr.first()?.content)
+    const votedChar = characters[charIdNum]
+    if(!votedChar) return ch.send('不明なキャラクターIDです。投票をキャンセルします')
 
-        ch.send(`${votedChar}に投票します。何票入れますか?\n半角で入力してください。(例:10)\n自然数以外を入力すると投票がキャンセルされます。`)
-        ch.awaitMessages({ filter, max: 1, time: 30 * 1000 })
-            .then(async collected => {
-                if (!collected.size) return ch.send('タイムアウトしました。投票をキャンセルします')
-                let desiredVoteAmt =  Number(collected.first()?.content)
-                db.get(
-                    `select ${votedChar} from pd where id = ?`,
-                    [id],
-                    (err:any, row:any) => { 
-                        const votedRecord = Number(row[votedChar])                        
-                        if (isNaN(desiredVoteAmt) || desiredVoteAmt < 1 ) return ch.send('無効な値です。投票をキャンセルします')
-                        if(balance < desiredVoteAmt) return ch.send('残高不足です。投票をキャンセルします。')
-                        desiredVoteAmt += Math.floor(votedRecord);
-                        db.run(`update pd set ${votedChar} = ?  where id = ?`, [desiredVoteAmt, id])
-                        ch.send(`${votedChar}に${desiredVoteAmt}票入れました。投票を終了します。`)
-                    }
-                )
-            })
-    })
-} 
-async function fetchPD(){
+    ch.send(`${votedChar}に投票します。何票入れますか?\n半角で入力してください。(例:10)\n自然数以外を入力すると投票がキャンセルされます。`)
+    const voteAmtStr = await ch.awaitMessages({ filter, max: 1, time: 30 * 1000 })
+    if (!voteAmtStr.size) return ch.send('タイムアウトしました。投票をキャンセルします')
+    let voteRequested =  Number(voteAmtStr.first()?.content)
+    db.get(
+        `select ${votedChar} from pd where id = ?`,
+        [id],
+        (err:any, rec:any) => { 
+            const votedRecord = Number(rec[votedChar])                        
+            if (isNaN(voteRequested) || voteRequested < 1 ) return ch.send('無効な値です。投票をキャンセルします')
+            if(balance < voteRequested) return ch.send('残高不足です。投票をキャンセルします。')
+            voteRequested += Math.floor(votedRecord);
+            db.run(`update pd set ${votedChar} = ?  where id = ?`, [voteRequested, id])
+            ch.send(`${votedChar}に${voteRequested}票入れました。投票を終了します。`)
+        }
+    )
+}
+
+async function fetchPD(senderId:string){
+    const senderTag = client.users.cache.get(senderId)!.tag
     const pData = await Fetch()    
     db.serialize(() => {
         for (let i = 0; i < pData.length; i++) {
-            const id = pData[i][4]
+            const regTag = pData[i][1]
             const name = pData[i][2]
-            db.run(`INSERT or ignore INTO pd(id, name) VALUES (?, ?)`, [id, name]);
+            let regId = pData[i][4]
+
+            if (!name) continue
+            if (!regId){
+                if (regTag === senderTag) regId = senderId
+                else continue
+            }
+            db.run(`INSERT or ignore INTO pd(id, name) VALUES (?, ?)`, [regId, name]);
         }
     })
 }
 
-
-function sql_table(){
+function setupSQL(){
     let order = `CREATE TABLE IF NOT EXISTS pd(
         id text primary key,
         name text,
@@ -127,9 +131,12 @@ function sql_table(){
         order += ', ' + characters[i] + ' int not null default 0'
     }
     order += ')'
-
-    return order
+    db.serialize(() => {
+        db.run(order);
+        //db.run(`INSERT OR IGNORE INTO pd(id, name) VALUES (?, ?)`, ['0', "TOTAL"]);
+    })
 }
+
 async function sendVotingStatus(ch:DMChannel, id:string){
     const balance:number = await new Promise((resolve)=>{
         let msg = ''
@@ -141,8 +148,8 @@ async function sendVotingStatus(ch:DMChannel, id:string){
                 let ptUsed = 0                       
                 for (let i = 0; i < characters.length; i++) {
                     const voted = Number(row[characters[i]])
-                    const id = i<10? i+' ' : i+''
-                    msg += `ID: ${id}    ${voted}票    ${characters[i]}\n`
+                    const cid = i<10? i+' ' : i+''
+                    msg += `ID: ${cid}    ${voted}票    ${characters[i]}\n`
                     ptUsed += voted
                 }
                 const balance = Number(row['earned']) + Number(row['adjust']) - ptUsed
@@ -203,25 +210,32 @@ function addPointsAPI(){
 }
 
 function isAdmin(id:string){
-    const admins = ['えびてん#8658', 'poko#3397', 'konaso#1033', 'ぴにぷ#7148']
+    const admins = ['573448752950673408', '644665543139262484', '499204446165794819', '664793910471557120']
     if (admins.includes(id)) return true
     else return false
 }
 
-async function total(){
-    const voted:Array<string> = new Array(characters.length).fill(0)
-    let earned = 0
-    db.all(
-        `select * from pd`,
-        (err:any, row:any) => { 
-            for (let r = 0; r < row.length; r++) {
-                for (let c = 0; c < characters.length; c++) {
-                    const tmp = row[r][characters[c]]
-                    voted[c] += Number(tmp)
+async function total():Promise<Array<number>>{
+    return await new Promise((resolve, reject) => {
+        db.all(
+            `select * from pd`,
+            (err:any, row:any) => {
+                const voted:Array<number> = new Array(characters.length).fill(0)
+                let earned = 0
+                if(err){
+                    reject(err);
+                } else {
+                    for (let r = 0; r < row.length; r++) {
+                        for (let c = 0; c < characters.length; c++) {
+                            const tmp = row[r][characters[c]]
+                            voted[c] += Number(tmp)
+                        }
+                        earned += Number(row[r]['earned']) + Number(row[r]['adjust'])
+                    }
+                    voted.push(earned)
+                    resolve(voted)
                 }
-                earned += Number(row[r]['earned']) + Number(row[r]['adjust'])
             }
-            return voted
-        }
-    )
+        )
+    })    
 }
