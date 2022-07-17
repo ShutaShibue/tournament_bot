@@ -6,7 +6,7 @@ dotenv.config()
 const url = "https://sheets.googleapis.com/v4/spreadsheets/" + spreadSheetID + "/values/" + sheetName + "?key=" + process.env.API_key
 import fetch from 'node-fetch'
 export async function Fetch() {
-    const Plists:Array<Array<string>> = []
+    const Plists:Array<Array<any>> = []
     await fetch(url)
         .then(async res => {
             const n = await res.json()
@@ -14,7 +14,7 @@ export async function Fetch() {
             data.shift() //remove head
             for (let i=0; i<data.length; i++){
                 const Elem = data[i]
-                Plists.push(Elem.slice(1,3))
+                Plists.push(Elem)
             }         
     })
     return Plists
