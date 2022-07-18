@@ -2,6 +2,8 @@ import { Message, Client, DMChannel, MessageEmbed } from 'discord.js'
 import dotenv from 'dotenv'
 import {Fetch} from './fetchSheet'
 import * as sqlite3 from 'sqlite3';
+import axios from 'axios'
+
 const characters = [
     '一姫', '二階堂美樹', '軽庫娘', '藤田佳奈', '三上千織', '相原舞', '撫子', '八木唯',
     '九条璃雨', 'ジニア', 'カーヴィ', 'サラ', '二之宮花', '白石奈々', '小鳥遊雛田', 
@@ -36,6 +38,7 @@ client.once('ready', () => {
 
 client.on('messageCreate', async (message: Message) => {
     if (message.author.bot) return
+    if (message.content.startsWith('告知') && isAdmin(message.author.id)) announcement(message.content.split(' ')[1])
     if (message.content.startsWith('pt追加') && isAdmin(message.author.id)) adjustPoints(message)
     if (message.channel.type !== "DM") return
     if (!client.user) return
@@ -60,12 +63,7 @@ function playerSystem(message:Message){
         if (sel === "1")  sendVotingStatus(ch, id)
         else if (sel === "2") await vote(ch, id)
         else if (sel === "3") await fetchPD(id).then(()=> ch.send('データベースを更新しました'))
-        else if (sel === "dev"){
-            const pts:Array<number> = await total()
-            const ptEarned = pts.pop()!
-            const ptUsed = pts.reduce((a, b) => a + b, 0)
-            ch.send((ptEarned-ptUsed).toString())
-        }
+        else if (sel === "dev") await addPointsAPI()
         else ch.send('終了します')  
     })
 }
@@ -76,9 +74,9 @@ async function vote(ch:DMChannel, id:string) {
     ch.send('投票したいキャラクターの番号を入力してください。')
     const filter = (msg:Message) => msg.author.id !== client.user?.id
     // select character
-    const charIdStr = await ch.awaitMessages({ filter, max: 1, time: 20 * 1000 })
-    if (!charIdStr.size) return ch.send('タイムアウトしました。投票をキャンセルします')
-    const charIdNum =  Number(charIdStr.first()?.content)
+    const charIdObj = await ch.awaitMessages({ filter, max: 1, time: 20 * 1000 })
+    if (!charIdObj.size) return ch.send('タイムアウトしました。投票をキャンセルします')
+    const charIdNum =  Number(charIdObj.first()?.content)
     const votedChar = characters[charIdNum]
     if(!votedChar) return ch.send('不明なキャラクターIDです。投票をキャンセルします')
 
@@ -95,7 +93,7 @@ async function vote(ch:DMChannel, id:string) {
             if(balance < voteRequested) return ch.send('残高不足です。投票をキャンセルします。')
             voteRequested += Math.floor(votedRecord);
             db.run(`update pd set ${votedChar} = ?  where id = ?`, [voteRequested, id])
-            ch.send(`${votedChar}に${voteRequested}票入れました。投票を終了します。`)
+            ch.send(`${votedChar}に${voteRequested}票入れました。投票完了 (pt残高: ${balance-voteRequested})`)
         }
     )
 }
@@ -194,19 +192,53 @@ function adjustPoints(msg:Message){
         })
 }
 
-function addPointsAPI(){
-    const jsonObject = {}
-    const id = ''
-    const adds = 0
-    db.get(
-        `select earned from pd where id = ?`,
-        [id], 
-        (err:any, row:any) => { 
-            const record = Number(row['adjust'])
-            db.run(`update pd set earned = ?  where id = ?`, [record + adds, id])
+async function addPointsAPI(){
+    const parsed :{ [name: string]: number } = {}
+    const slope = [10, 5, 2]
+    /*
+    const url = 'https://sinoa.ws/janyuapp/tournament/point?tournament_id=0'
+    axios.get(url, {
+        headers: {
+          Authorization: `Bearer ${process.env.janyuApp}`,
         }
-    )
+    }).then((response) =>{
+        console.log(response);
+    }).catch(e=>console.log(e.response.data))
+*/
+    const responseSample = {
+        "result": "success",
+        "tournament_id": "6",
+        "records": [
+            {
+                "first_player_name": "いちのみや",
+                "first_point": 39.4,
+                "second_player_name": "ぽこたいと",
+                "second_point": 3.3,
+                "third_player_name": "緋縅蝶",
+                "third_point": -42.7,
+                "fourth_player_name": null,
+                "fourth_point": null,
+                "tag": null,
+                "paifu_link": "220605-d5432972-56e8-44f4-b4b1-4cff6aecd04e",
+            }
+        ]
+    }
+    const matches = responseSample.records
 
+    for (let m = 0; m < matches.length; m++) {
+        const pList = []
+        pList.push(matches[m].first_player_name)
+        pList.push(matches[m].second_player_name)
+        pList.push(matches[m].third_player_name)
+        for (let r = 0; r < 3; r++){
+            if (!(pList[r] in parsed)) parsed[pList[r]] = 0
+            parsed[pList[r]] += slope[r]
+        }
+    }
+    Object.keys(parsed).forEach((pName:string) => {
+        const pt = parsed[pName]        
+        db.run(`update pd set earned = ?  where name = ?`, [pt, pName])
+      });
 }
 
 function isAdmin(id:string){
@@ -214,8 +246,7 @@ function isAdmin(id:string){
     if (admins.includes(id)) return true
     else return false
 }
-
-async function total():Promise<Array<number>>{
+async function _total():Promise<Array<number>>{
     return await new Promise((resolve, reject) => {
         db.all(
             `select * from pd`,
@@ -238,4 +269,13 @@ async function total():Promise<Array<number>>{
             }
         )
     })    
+}
+
+async function announcement(msgId:string){
+    const targetCh = client.channels.cache.get('593411354069827595')
+    const adminCh = client.channels.cache.get('996036283438727232')
+    if (!adminCh?.isText() || !targetCh?.isText()) return
+    const msg = await adminCh.messages.fetch(msgId)
+    if(!msg || typeof(msg.content) !== 'string') return adminCh.send('古い/存在しない/平文以外のメッセージは送信できません')
+    targetCh.send(msg.content)
 }
