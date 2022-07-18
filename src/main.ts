@@ -38,12 +38,15 @@ client.once('ready', () => {
 
 client.on('messageCreate', async (message: Message) => {
     if (message.author.bot) return
-    if (message.content.startsWith('告知') && isAdmin(message.author.id)) announcement(message.content.split(' ')[1])
-    if (message.content.startsWith('pt追加') && isAdmin(message.author.id)) adjustPoints(message)
+
+    //運営用
+    if(isAdmin(message.author.id)){
+        if (message.content.startsWith('告知')) announcement(message.content.split(' ')[1])
+        if (message.content.startsWith('pt追加')) adjustPoints(message)
+    }
     if (message.channel.type !== "DM") return
-    if (!client.user) return
-    const botID = client.user.id
-    if (message.mentions.users.has(botID)) playerSystem(message)
+    // in DM
+    if (message.mentions.users.has(client.user!.id)) playerSystem(message)
 })
 
 client.login(process.env.TOKEN)
@@ -56,13 +59,13 @@ function playerSystem(message:Message){
         '何をしますか?\n1: 割り振り状況、pt残高を確認したい\n2: 投票したい\n3:新たにプレイヤー登録しました。確認してください。'
         )
     const filter = (msg:Message) => msg.author.id === id
-    ch?.awaitMessages({ filter, max: 1, time: 10 * 1000 })
+    ch?.awaitMessages({ filter, max: 1, time: 15 * 1000 })
     .then(async collected => {
         if (!collected.size) return ch.send('タイムアウトしました')
         const sel =  collected.first()?.content
-        if (sel === "1")  sendVotingStatus(ch, id)
-        else if (sel === "2") await vote(ch, id)
-        else if (sel === "3") await fetchPD(id).then(()=> ch.send('データベースを更新しました'))
+        if      (sel === "1")   await sendVotingStatus(ch, id)
+        else if (sel === "2")   await vote(ch, id)
+        else if (sel === "3")   await fetchPD(id).then(()=> ch.send('データベースを更新しました'))
         else if (sel === "dev") await addPointsAPI()
         else ch.send('終了します')  
     })
@@ -80,7 +83,7 @@ async function vote(ch:DMChannel, id:string) {
     const votedChar = characters[charIdNum]
     if(!votedChar) return ch.send('不明なキャラクターIDです。投票をキャンセルします')
 
-    ch.send(`${votedChar}に投票します。何票入れますか?\n半角で入力してください。(例:10)\n自然数以外を入力すると投票がキャンセルされます。`)
+    ch.send(`${votedChar}に投票します。何票入れますか? (pt残高: ${balance}\n半角で入力してください。(例: 10)`)
     const voteAmtStr = await ch.awaitMessages({ filter, max: 1, time: 30 * 1000 })
     if (!voteAmtStr.size) return ch.send('タイムアウトしました。投票をキャンセルします')
     let voteRequested =  Number(voteAmtStr.first()?.content)
@@ -93,7 +96,14 @@ async function vote(ch:DMChannel, id:string) {
             if(balance < voteRequested) return ch.send('残高不足です。投票をキャンセルします。')
             voteRequested += Math.floor(votedRecord);
             db.run(`update pd set ${votedChar} = ?  where id = ?`, [voteRequested, id])
-            ch.send(`${votedChar}に${voteRequested}票入れました。投票完了 (pt残高: ${balance-voteRequested})`)
+
+            const embed = new MessageEmbed()
+            .setTitle("投票完了")
+            .addField(votedChar, `合計${voteRequested}pt`, true)
+            .addField('pt残高', `${balance-voteRequested}`, true)
+            .setColor('#0000ff')
+            .setTimestamp()
+            ch.send({embeds: [embed] })
         }
     )
 }
