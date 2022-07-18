@@ -34,6 +34,7 @@ client.once('ready', () => {
     client.user?.setActivity(
         `開発中`,
     )
+    setInterval(addPointsAPI, 1000*60)
 })
 
 client.on('messageCreate', async (message: Message) => {
@@ -66,7 +67,7 @@ function playerSystem(message:Message){
         if      (sel === "1")   await sendVotingStatus(ch, id)
         else if (sel === "2")   await vote(ch, id)
         else if (sel === "3")   await fetchPD(id).then(()=> ch.send('データベースを更新しました'))
-        else if (sel === "dev") await addPointsAPI()
+        //else if (sel === "dev") await addPointsAPI()
         else ch.send('終了します')  
     })
 }
@@ -205,50 +206,31 @@ function adjustPoints(msg:Message){
 async function addPointsAPI(){
     const parsed :{ [name: string]: number } = {}
     const slope = [10, 5, 2]
-    /*
-    const url = 'https://sinoa.ws/janyuapp/tournament/point?tournament_id=0'
+    const url = 'https://sinoa.ws/janyuapp/tournament/point?tournament_id=1'
+
     axios.get(url, {
         headers: {
           Authorization: `Bearer ${process.env.janyuApp}`,
         }
     }).then((response) =>{
-        console.log(response);
-    }).catch(e=>console.log(e.response.data))
-*/
-    const responseSample = {
-        "result": "success",
-        "tournament_id": "6",
-        "records": [
-            {
-                "first_player_name": "いちのみや",
-                "first_point": 39.4,
-                "second_player_name": "ぽこたいと",
-                "second_point": 3.3,
-                "third_player_name": "緋縅蝶",
-                "third_point": -42.7,
-                "fourth_player_name": null,
-                "fourth_point": null,
-                "tag": null,
-                "paifu_link": "220605-d5432972-56e8-44f4-b4b1-4cff6aecd04e",
-            }
-        ]
-    }
-    const matches = responseSample.records
+        const matches = response.data.records
 
-    for (let m = 0; m < matches.length; m++) {
-        const pList = []
-        pList.push(matches[m].first_player_name)
-        pList.push(matches[m].second_player_name)
-        pList.push(matches[m].third_player_name)
-        for (let r = 0; r < 3; r++){
-            if (!(pList[r] in parsed)) parsed[pList[r]] = 0
-            parsed[pList[r]] += slope[r]
+        for (let m = 0; m < matches.length; m++) {
+            const pList = []
+            pList.push(matches[m].first_player_name)
+            pList.push(matches[m].second_player_name)
+            pList.push(matches[m].third_player_name)
+            for (let r = 0; r < 3; r++){
+                if (!(pList[r] in parsed)) parsed[pList[r]] = 0
+                parsed[pList[r]] += slope[r]
+            }
         }
-    }
-    Object.keys(parsed).forEach((pName:string) => {
-        const pt = parsed[pName]        
-        db.run(`update pd set earned = ?  where name = ?`, [pt, pName])
-      });
+        Object.keys(parsed).forEach((pName:string) => {
+            const pt = parsed[pName]        
+            db.run(`update pd set earned = ?  where name = ?`, [pt, pName])
+        })
+    }).catch(e=>console.log(e.response.data)) 
+
 }
 
 function isAdmin(id:string){
