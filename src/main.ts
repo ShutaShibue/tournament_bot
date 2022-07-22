@@ -19,7 +19,7 @@ dotenv.config()
 
 // database init
 const db = new sqlite3.Database('db.sqlite3')
-setupSQL()
+createSqlTable()
 
 
 // discord client init
@@ -34,55 +34,65 @@ client.once('ready', () => {
     client.user?.setActivity(
         `開発中`,
     )
-    setInterval(addPointsAPI, 1000*60)
+    setInterval(fetchPointsAPI, 1000*60)
 })
 
-client.on('messageCreate', async (message: Message) => {
-    if (message.author.bot) return
+client.on('messageCreate', async (msg: Message) => {
+    if (msg.author.bot) return
 
     //運営用
-    if(isAdmin(message.author.id)){
-        if (message.content.startsWith('$告知')) announcement(message.content.split(' ')[1])
-        if (message.content.startsWith('$pt追加')) await adjustPoints(message)
-        if (message.content.startsWith('$集計')){
-            const data = await total()
-            let msg = '現在の投票状況(全体)\n'
-            let ptUsed = 0
-            for (let i = 0; i < characters.length; i++) {
-                const voted = data[i]
-                const cid = i<10? i+' ' : i+''
-                msg += `ID: ${cid}    ${voted}票    ${characters[i]}\n`
-                ptUsed += voted
-            }
-            msg += `未使用ポイント合計： ${data[60]-ptUsed}`
-            message.channel.send(msg)
-        }
+    if(isAdmin(msg.author.id)){
+        if (msg.content.startsWith('$pt追加'))  await adjustPoints(msg)
+        if (msg.content.startsWith('$集計'))    await sendTotal(msg)
     }
-    if (message.channel.type !== "DM") return
-    // in DM
-    if (message.mentions.users.has(client.user!.id)) playerSystem(message)
+    if (msg.channel.type !== "DM") return
+    if (msg.mentions.users.has(client.user!.id))await DmLanding(msg)
 })
 
 client.login(process.env.TOKEN)
 
-function playerSystem(message:Message){
-    const id = message.author.id
+async function DmLanding(msg:Message){
+    const id = msg.author.id
     const ch = client.users.cache.get(id)?.dmChannel
 
-    ch?.send(
-        '何をしますか?\n1: 割り振り状況、pt残高を確認したい\n2: 投票したい\n3:新たにプレイヤー登録しました。確認してください。'
-        )
-    const filter = (msg:Message) => msg.author.id === id
+    ch?.send('何をしますか?\n1: 割り振り状況、pt残高を確認したい\n2: 投票したい\n3:新たにプレイヤー登録しました。確認してください。')
+    const filter = (m:Message) => m.author.id === id
     ch?.awaitMessages({ filter, max: 1, time: 15 * 1000 })
     .then(async collected => {
         if (!collected.size) return ch.send('タイムアウトしました')
         const sel =  collected.first()?.content
         if      (sel === "1")   await sendVotingStatus(ch, id)
         else if (sel === "2")   await vote(ch, id)
-        else if (sel === "3")   await fetchPD(id).then(()=> ch.send('データベースを更新しました'))
-        //else if (sel === "dev") await addPointsAPI()
+        else if (sel === "3")   await fetchPD(ch, id)
+        else if (sel === "dev") await fetchPointsAPI()
         else ch.send('終了します')  
     })
+}
+
+async function sendVotingStatus(ch:DMChannel, id:string){
+
+    const balance:number = await new Promise((resolve)=>{
+        let msg = '現在の投票状況(個人)'
+        db.get(
+            `select * from pd where id = ?`,
+            [id],
+            (err:any, row:any) => { 
+                if (err) return ch.send('プレイヤー登録をしてください。最近した場合は、「3:新たにプレイヤー登録しました。確認してください。」を選択してください。\n終了します。')
+                let ptUsed = 0                       
+                for (let i = 0; i < characters.length; i++) {
+                    const voted = Number(row[characters[i]])
+                    const cid = i<10? i+' ' : i+''
+                    msg += `ID: ${cid}    ${voted}票    ${characters[i]}\n`
+                    ptUsed += voted
+                }
+                const balance = Number(row['earned']) + Number(row['adjust']) - ptUsed
+                msg += `\nあなたのポイント残高: ${balance}\n`
+                ch.send(msg)
+                resolve(balance)
+            }
+        )
+    })
+    return balance
 }
 
 async function vote(ch:DMChannel, id:string) {
@@ -122,7 +132,7 @@ async function vote(ch:DMChannel, id:string) {
     )
 }
 
-async function fetchPD(senderId:string){
+async function fetchPD(ch:DMChannel, senderId:string){
     const senderTag = client.users.cache.get(senderId)!.tag
     const pData = await Fetch()    
     db.serialize(() => {
@@ -140,9 +150,68 @@ async function fetchPD(senderId:string){
             db.run(`INSERT or ignore INTO pd(id, name, adjust) VALUES (?, ?, ?)`, [regId, name, adj]);
         }
     })
+    ch.send('データベースを更新しました')
 }
 
-function setupSQL(){
+async function fetchPointsAPI(){
+    interface APIRecordsArray{
+        play_start_at: string;
+        play_end_at: string;
+        first_player_name: string;
+        first_point: number;
+        second_player_name: string;
+        second_point: number;
+        third_player_name: string;
+        third_point: number;
+        fourth_player_name: null;
+        fourth_point: null;
+        tag: null;
+        paifu_link: string;
+    }
+    const parsed :{
+        [name: string]:{
+            "points": number,
+            "played": number
+        } 
+    } = {}
+    const slope = [10, 5, 2]
+    const url = 'https://sinoa.ws/janyuapp/tournament/point?tournament_id=1'
+
+    axios.get(url, {
+        headers: {
+          Authorization: `Bearer ${process.env.janyuApp}`,
+        }
+    }).then((response) =>{
+        const matches: APIRecordsArray[] = response.data.records
+        for (let m = 0; m < matches.length; m++) {
+            const pList = []
+            const datestr = matches[m].play_start_at
+            var date = Date.parse(datestr);
+            const validDate = new Date('2022/7/21').getTime()
+            
+            if(date < validDate) continue
+            pList.push(matches[m].first_player_name)
+            pList.push(matches[m].second_player_name)
+            pList.push(matches[m].third_player_name)
+            for (let r = 0; r < 3; r++){
+                if (!(pList[r] in parsed)) {
+                    parsed[pList[r]].played = 0
+                    parsed[pList[r]].points = 0
+                }
+                parsed[pList[r]].points += slope[r]
+                parsed[pList[r]].played += 1
+            }
+        }
+        Object.keys(parsed).forEach((pName:string) => {
+            const pt = parsed[pName].points
+            const numPlayed = parsed[pName].played
+            db.run(`update pd set earned = ?, played = ?  where name = ?`, [pt, numPlayed, pName])
+        })
+    }).catch(e=>console.log(e.response.data)) 
+
+}
+
+function createSqlTable(){
     let order = `CREATE TABLE IF NOT EXISTS pd(
         id text primary key,
         name text,
@@ -159,31 +228,6 @@ function setupSQL(){
         db.run(order);
         //db.run(`INSERT OR IGNORE INTO pd(id, name) VALUES (?, ?)`, ['0', "TOTAL"]);
     })
-}
-
-async function sendVotingStatus(ch:DMChannel, id:string){
-    const balance:number = await new Promise((resolve)=>{
-        let msg = '現在の投票状況(個人)'
-        db.get(
-            `select * from pd where id = ?`,
-            [id],
-            (err:any, row:any) => { 
-                if (err) return ch.send('プレイヤー登録をしてください。最近した場合は、「3:新たにプレイヤー登録しました。確認してください。」を選択してください。\n終了します。')
-                let ptUsed = 0                       
-                for (let i = 0; i < characters.length; i++) {
-                    const voted = Number(row[characters[i]])
-                    const cid = i<10? i+' ' : i+''
-                    msg += `ID: ${cid}    ${voted}票    ${characters[i]}\n`
-                    ptUsed += voted
-                }
-                const balance = Number(row['earned']) + Number(row['adjust']) - ptUsed
-                msg += `\nあなたのポイント残高: ${balance}\n`
-                ch.send(msg)
-                resolve(balance)
-            }
-        )
-    })
-    return balance
 }
 
 function adjustPoints(msg:Message){
@@ -214,56 +258,26 @@ function adjustPoints(msg:Message){
         })
 }
 
-async function addPointsAPI(){
-    const parsed :{
-        [name: string]:{
-            "points": number,
-            "played": number
-        } 
-    } = {}
-    const slope = [10, 5, 2]
-    const url = 'https://sinoa.ws/janyuapp/tournament/point?tournament_id=1'
-
-    axios.get(url, {
-        headers: {
-          Authorization: `Bearer ${process.env.janyuApp}`,
-        }
-    }).then((response) =>{
-        const matches = response.data.records
-
-        for (let m = 0; m < matches.length; m++) {
-            const pList = []
-            const datestr = matches[m].play_start_at
-            var date = Date.parse(datestr);
-            const validDate = new Date('2022/7/21').getTime()
-            
-            if(date < validDate) continue
-            pList.push(matches[m].first_player_name)
-            pList.push(matches[m].second_player_name)
-            pList.push(matches[m].third_player_name)
-            for (let r = 0; r < 3; r++){
-                if (!(pList[r] in parsed)) {
-                    parsed[pList[r]].played = 0
-                    parsed[pList[r]].points = 0
-                }
-                parsed[pList[r]].points += slope[r]
-                parsed[pList[r]].played += 1
-            }
-        }
-        Object.keys(parsed).forEach((pName:string) => {
-            const pt = parsed[pName].points
-            const numPlayed = parsed[pName].played
-            db.run(`update pd set earned = ?, played = ?  where name = ?`, [pt, numPlayed, pName])
-        })
-    }).catch(e=>console.log(e.response.data)) 
-
-}
-
 function isAdmin(id:string){
     const admins = ['573448752950673408', '644665543139262484', '499204446165794819', '664793910471557120']
     if (admins.includes(id)) return true
     else return false
 }
+
+async function sendTotal(message:Message) {
+    const data = await total()
+    let msg = '現在の投票状況(全体)\n'
+    let ptUsed = 0
+    for (let i = 0; i < characters.length; i++) {
+        const voted = data[i]
+        const cid = i<10? i+' ' : i+''
+        msg += `ID: ${cid}    ${voted}票    ${characters[i]}\n`
+        ptUsed += voted
+    }
+    msg += `未使用ポイント合計： ${data[60]-ptUsed}`
+    message.channel.send(msg)
+}
+
 async function total():Promise<Array<number>>{
     return await new Promise((resolve, reject) => {
         db.all(
@@ -287,13 +301,4 @@ async function total():Promise<Array<number>>{
             }
         )
     })    
-}
-
-async function announcement(msgId:string){
-    const targetCh = client.channels.cache.get('593411354069827595')
-    const adminCh = client.channels.cache.get('996036283438727232')
-    if (!adminCh?.isText() || !targetCh?.isText()) return
-    const msg = await adminCh.messages.fetch(msgId)
-    if(!msg || typeof(msg.content) !== 'string') return adminCh.send('古い/存在しない/平文以外のメッセージは送信できません')
-    targetCh.send(msg.content)
 }
