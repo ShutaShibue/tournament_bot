@@ -42,8 +42,21 @@ client.on('messageCreate', async (message: Message) => {
 
     //運営用
     if(isAdmin(message.author.id)){
-        if (message.content.startsWith('告知')) announcement(message.content.split(' ')[1])
-        if (message.content.startsWith('pt追加')) adjustPoints(message)
+        if (message.content.startsWith('$告知')) announcement(message.content.split(' ')[1])
+        if (message.content.startsWith('$pt追加')) await adjustPoints(message)
+        if (message.content.startsWith('$集計')){
+            const data = await total()
+            let msg = '現在の投票状況(全体)\n'
+            let ptUsed = 0
+            for (let i = 0; i < characters.length; i++) {
+                const voted = data[i]
+                const cid = i<10? i+' ' : i+''
+                msg += `ID: ${cid}    ${voted}票    ${characters[i]}\n`
+                ptUsed += voted
+            }
+            msg += `未使用ポイント合計： ${data[60]-ptUsed}`
+            message.channel.send(msg)
+        }
     }
     if (message.channel.type !== "DM") return
     // in DM
@@ -117,13 +130,14 @@ async function fetchPD(senderId:string){
             const regTag = pData[i][1]
             const name = pData[i][2]
             let regId = pData[i][4]
-
+            const initPt = pData[i][5]
+            const adj = initPt==10?10:0
             if (!name) continue
             if (!regId){
                 if (regTag === senderTag) regId = senderId
                 else continue
             }
-            db.run(`INSERT or ignore INTO pd(id, name) VALUES (?, ?)`, [regId, name]);
+            db.run(`INSERT or ignore INTO pd(id, name, adjust) VALUES (?, ?, ?)`, [regId, name, adj]);
         }
     })
 }
@@ -132,6 +146,7 @@ function setupSQL(){
     let order = `CREATE TABLE IF NOT EXISTS pd(
         id text primary key,
         name text,
+        played int not null default 0,
         earned int not null default 0,
         adjust int not null default 0
         `
@@ -148,7 +163,7 @@ function setupSQL(){
 
 async function sendVotingStatus(ch:DMChannel, id:string){
     const balance:number = await new Promise((resolve)=>{
-        let msg = ''
+        let msg = '現在の投票状況(個人)'
         db.get(
             `select * from pd where id = ?`,
             [id],
@@ -172,39 +187,40 @@ async function sendVotingStatus(ch:DMChannel, id:string){
 }
 
 function adjustPoints(msg:Message){
-    const executer = msg.author.id
-
     const player = msg.mentions.members?.first()
     if (!player) return msg.channel.send('Argument Invalid')
 
     const msgs = msg.content.split(' ')
-    const reason = msgs[2]
-    const adds = Math.floor(Number(msgs[3]))
-    
-    if(!adds || adds < 0) return msg.channel.send('Value Invalid')
+    const reason = msgs[2] 
+    const pt = !msgs[3]?10:Math.floor(Number(msgs[3]))
 
     db.get(
         `select adjust from pd where id = ?`,
         [player.user.id], 
         (err:any, row:any) => { 
             const record = Number(row['adjust'])
-            db.run(`update pd set adjust = ?  where id = ?`, [record + adds, player.user.id])
+            db.run(`update pd set adjust = ?  where id = ?`, [record + pt, player.user.id])
 
             const embed = new MessageEmbed()
             .setTitle(reason)
-            .addField(player.displayName, `${adds}ポイント追加`)
+            .addField(player.displayName, `${pt}10ポイント追加`)
             .setColor('#00ff00')
             .setTimestamp()
 
             embed.setFooter({
-                text: '運営: ' + executer
+                text: '運営: ' + msg.author.tag
                 })
             msg.channel.send({embeds: [embed] })
         })
 }
 
 async function addPointsAPI(){
-    const parsed :{ [name: string]: number } = {}
+    const parsed :{
+        [name: string]:{
+            "points": number,
+            "played": number
+        } 
+    } = {}
     const slope = [10, 5, 2]
     const url = 'https://sinoa.ws/janyuapp/tournament/point?tournament_id=1'
 
@@ -217,17 +233,27 @@ async function addPointsAPI(){
 
         for (let m = 0; m < matches.length; m++) {
             const pList = []
+            const datestr = matches[m].play_start_at
+            var date = Date.parse(datestr);
+            const validDate = new Date('2022/7/21').getTime()
+            
+            if(date < validDate) continue
             pList.push(matches[m].first_player_name)
             pList.push(matches[m].second_player_name)
             pList.push(matches[m].third_player_name)
             for (let r = 0; r < 3; r++){
-                if (!(pList[r] in parsed)) parsed[pList[r]] = 0
-                parsed[pList[r]] += slope[r]
+                if (!(pList[r] in parsed)) {
+                    parsed[pList[r]].played = 0
+                    parsed[pList[r]].points = 0
+                }
+                parsed[pList[r]].points += slope[r]
+                parsed[pList[r]].played += 1
             }
         }
         Object.keys(parsed).forEach((pName:string) => {
-            const pt = parsed[pName]        
-            db.run(`update pd set earned = ?  where name = ?`, [pt, pName])
+            const pt = parsed[pName].points
+            const numPlayed = parsed[pName].played
+            db.run(`update pd set earned = ?, played = ?  where name = ?`, [pt, numPlayed, pName])
         })
     }).catch(e=>console.log(e.response.data)) 
 
@@ -238,7 +264,7 @@ function isAdmin(id:string){
     if (admins.includes(id)) return true
     else return false
 }
-async function _total():Promise<Array<number>>{
+async function total():Promise<Array<number>>{
     return await new Promise((resolve, reject) => {
         db.all(
             `select * from pd`,
